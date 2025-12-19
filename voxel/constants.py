@@ -1,0 +1,6 @@
+APP_NAME = "Voxel"
+APP_VERSION = "1.0.0"
+APP_COPYRIGHT = "© 2025"
+APP_AUTHOR = "Pedro Ferreira"
+APP_DESCRIPTION = "A simple DICOM viewer application."
+APP_LICENSE = "MIT License"

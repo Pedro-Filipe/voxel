@@ -1,0 +1,38 @@
+#pycharm config stuff
+.idea/
+# virtual env
+.venv/
+# vscode stuff
+.vscode/*
+
+# pycache
+__pycache__/
+
+# macOS
+.DS_Store
+
+# env file
+*.env
+
+
+# Distribution / packaging
+.Python
+build/
+develop-eggs/
+dist/
+downloads/
+eggs/
+.eggs/
+lib/
+lib64/
+parts/
+sdist/
+var/
+wheels/
+share/python-wheels/
+*.egg-info/
+.installed.cfg
+*.egg
+MANIFEST
+
+cov*
