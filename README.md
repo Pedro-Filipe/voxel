@@ -1,7 +1,7 @@
 # Voxel
 
 <p align="center">
-<img src="assets/icon_image.png">
+<img src="voxel/assets/icon_image.png">
 </p>
 
 <p align="center">

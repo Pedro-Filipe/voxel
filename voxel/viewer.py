@@ -1,5 +1,6 @@
 import os
 import threading
+import sys
 
 import tkinter as tk
 from tkinter import ttk, filedialog, messagebox
@@ -37,9 +38,15 @@ class DICOMViewer(tk.Tk):
         self.geometry("1200x800")
         self.minsize(900, 600)
 
-        # Load PNG and set as iconphoto
+        # Load icon from package / bundled app
         try:
-            icon_img = PILImage.open("assets/icon.png")
+            if getattr(sys, "frozen", False):
+                base_dir = sys._MEIPASS  # type: ignore[attr-defined]
+            else:
+                base_dir = os.path.dirname(os.path.abspath(__file__))
+
+            icon_path = os.path.join(base_dir, "assets", "icon.png")
+            icon_img = PILImage.open(icon_path)
             self.iconphoto(False, ImageTk.PhotoImage(icon_img))
         except Exception as e:
             print(f"Icon load failed: {e}")
