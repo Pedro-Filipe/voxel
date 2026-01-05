@@ -32,6 +32,25 @@ from .utils_dicom import (
 # GUI Application
 # ----------------------------
 class DICOMViewer(tk.Tk):
+    """
+    A class to create a DICOM viewer application using Tkinter.
+
+    Attributes:
+        metadata_cache (dict): Cache for metadata of DICOM files.
+        pixel_cache (LRUCache): Cache for pixel data.
+        folder (str): Current folder containing DICOM files.
+        files (list): List of all DICOM files.
+        filtered_files (list): List of filtered DICOM files.
+        current_index (int): Index of the currently displayed file.
+        current_ds (Dataset): Current DICOM dataset.
+        ... (other attributes)
+    """
+
+
+# ----------------------------
+# GUI Application
+# ----------------------------
+class DICOMViewer(tk.Tk):
     def __init__(self):
         super().__init__()
         self.title(APP_NAME)
@@ -1742,6 +1761,10 @@ class DICOMViewer(tk.Tk):
                         break
 
         if mr is None:
+            # get root dataset in case it is an old siemens DICOM header
+            mr = ds
+
+        if mr is None:
             return None
 
         def get_attr(d, name, tag_hex=None):
@@ -1759,6 +1782,9 @@ class DICOMViewer(tk.Tk):
             return None
 
         bval = get_attr(mr, "DiffusionBValue", 0x00189087)
+        if bval is None:
+            bval = get_attr(mr, "[B_value]", 0x0019100C)
+
         dirality = get_attr(mr, "DiffusionDirectionality", 0x00189075)
 
         grad_vec = None
@@ -1840,7 +1866,8 @@ class DICOMViewer(tk.Tk):
         ty = int(y1) - pad
 
         # text = f"Diffusion: b={info['b']} | Dir={info['dir']} | Grad={info['grad']}"
-        text = f"Diffusion: b={info['b']} | Dir={info['dir']}"
+        # text = f"Diffusion: b={info['b']} | Dir={info['dir']}"
+        text = f"Diffusion: b={info['b']}"
         txt_id = self.canvas.create_text(
             tx,
             ty,
@@ -1918,9 +1945,9 @@ class DICOMViewer(tk.Tk):
                 xR,
                 y,
                 text=line,
-                fill="#ffffff",
+                fill="#00e0ff",
                 anchor="ne",
-                font=("TkDefaultFont", 10),
+                font=("TkDefaultFont", 10, "bold"),
                 tags="overlay",
             )
             try:
