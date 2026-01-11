@@ -1,7 +1,7 @@
 # Voxel
 
 <p align="center">
-<img src="voxel/assets/icon_image.png">
+<img src="voxel/assets/icon_image_small.png">
 </p>
 
 <p align="center">
@@ -45,13 +45,14 @@ A DICOM viewer with advanced features including multi-frame navigation, window/l
 
 Prerequisites
 
-**You need a version of Python with Tkinter installed.**
+> [!WARNING]
+> You need a version of Python with Tkinter installed.
+
+More details on troubleshooting Tkinter installation issues can be found in the [Tkinter Issues and Fixes](docs/tkinter_issues.md) document.
 
 ```bash
 pip install -r requirements.txt
 ```
-
-More details on troubleshooting Tkinter installation issues can be found in the [Tkinter Issues and Fixes](docs/tkinter_issues.md) document.
 
 ## Run the application
 
