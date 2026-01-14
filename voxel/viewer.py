@@ -32,18 +32,60 @@ from .utils_dicom import (
 # GUI Application
 # ----------------------------
 class DICOMViewer(tk.Tk):
-    """
-    A class to create a DICOM viewer application using Tkinter.
+    """Tkinter-based DICOM viewer application.
+
+    This class implements the main GUI for browsing, visualising and
+    inspecting DICOM data. It provides:
+
+    - Recursive folder scanning and DICOM detection.
+    - Study/series/instance hierarchy with filtering.
+    - Multi-frame navigation and window/level controls.
+    - Crosshair + pixel readout overlays.
+    - Diffusion and basic metadata overlays.
+    - Freehand ROI drawing and statistics.
 
     Attributes:
-        metadata_cache (dict): Cache for metadata of DICOM files.
-        pixel_cache (LRUCache): Cache for pixel data.
-        folder (str): Current folder containing DICOM files.
-        files (list): List of all DICOM files.
-        filtered_files (list): List of filtered DICOM files.
-        current_index (int): Index of the currently displayed file.
-        current_ds (Dataset): Current DICOM dataset.
-        ... (other attributes)
+        metadata_cache (dict[str, pydicom.Dataset]): Cache of DICOM
+            metadata (typically read with ``stop_before_pixels=True``),
+            keyed by absolute file path.
+        pixel_cache (LRUCache): LRU cache for decoded pixel arrays,
+            keyed by absolute file path.
+        folder (str | None): Currently opened folder, or ``None`` if
+            no folder is loaded.
+        files (list[str]): Flat list of all discovered DICOM file paths.
+        filtered_files (list[str]): Subset of ``files`` that match the
+            current file filter and are represented in the file tree.
+        current_index (int): Index into ``filtered_files`` of the
+            currently selected file, or ``-1`` if none.
+        current_ds (pydicom.Dataset | None): Currently loaded DICOM
+            dataset (with pixels if available), or ``None``.
+        series_hierarchy (dict): Nested structure describing
+            study/series/instance organisation used by the file tree.
+        tree_item_to_path (dict[str, str]): Mapping from Treeview item
+            IDs (leaf nodes) to absolute file paths.
+        current_image_pil (PIL.Image.Image | None): Current PIL image
+            used as the render source for the canvas.
+        current_image_tk (ImageTk.PhotoImage | None): Tkinter-compatible
+            image created from ``current_image_pil``.
+        current_frame_index (int): Zero-based index of the currently
+            displayed frame for multi-frame datasets.
+        zoom (float): User zoom factor relative to the fit-to-window
+            scale.
+        pan_x (float): Horizontal pan offset in canvas pixels.
+        pan_y (float): Vertical pan offset in canvas pixels.
+        window_center (float | None): Current window center (level);
+            ``None`` means use default/auto.
+        window_width (float | None): Current window width; ``None``
+            means use default/auto.
+        show_crosshair (tk.BooleanVar): Whether crosshair and pixel
+            readout overlay are enabled.
+        roi_mode (tk.BooleanVar): Whether ROI drawing mode is active.
+        roi_points (list[tuple[int, int]]): ROI polyline vertices in
+            image coordinates.
+        roi_mask (numpy.ndarray | None): Boolean mask of ROI pixels in
+            image coordinates, or ``None`` if no ROI is defined.
+        roi_stats (dict | None): Cached ROI statistics (mean, std,
+            median, IQR, N), or ``None``.
     """
 
 
@@ -52,6 +94,12 @@ class DICOMViewer(tk.Tk):
 # ----------------------------
 class DICOMViewer(tk.Tk):
     def __init__(self):
+        """Initialize the DICOM viewer window and internal state.
+
+        Creates the Tk root window, loads the application icon, sets up
+        caches and viewer state, builds the UI layout and binds keyboard
+        shortcuts and mouse handlers.
+        """
         super().__init__()
         self.title(APP_NAME)
         self.geometry("1200x800")
@@ -176,6 +224,15 @@ class DICOMViewer(tk.Tk):
         self._bind_keys()
 
     def _build_ui(self):
+        """Create and lay out all GUI widgets.
+
+        Builds:
+
+        - Menubar (File / Help).
+        - Toolbar with navigation, crosshair, ROI controls and status.
+        - Left pane: study/series/instance tree with filter.
+        - Right pane: image canvas with frame/WL controls and header tree.
+        """
         # Menu
         menubar = tk.Menu(self)
         filemenu = tk.Menu(menubar, tearoff=0)
@@ -458,6 +515,15 @@ class DICOMViewer(tk.Tk):
         self._on_toggle_roi_mode()
 
     def _bind_keys(self):
+        """Bind keyboard shortcuts for navigation, ROI, and file loading.
+
+        Binds keys such as:
+
+        - ``Ctrl+O``: open folder dialog.
+        - Arrow keys: navigate between files.
+        - ``Esc``: cancel in-progress ROI drawing.
+        - ``r``: clear ROI.
+        """
         self.bind("<Control-o>", lambda e: self.open_folder())
         self.bind("<Left>", lambda e: self.prev_file())
         self.bind("<Right>", lambda e: self.next_file())
@@ -469,16 +535,25 @@ class DICOMViewer(tk.Tk):
         self.bind("r", lambda e: self._clear_roi())
 
     def _show_about(self):
+        """Display the About dialog with application information."""
         msg = (
             f"{APP_NAME}\n"
             f"Version {APP_VERSION}\n\n"
-            "A fast, pragmatic DICOM viewer with diffusion info overlays, "
+            "A DICOM viewer with diffusion info overlays, "
             "multi-frame navigation, window/level control, and header exploration.\n\n"
             f"{APP_COPYRIGHT}"
         )
         messagebox.showinfo(title=f"About {APP_NAME}", message=msg)
 
     def _on_tree_select(self, event):
+        """Handle selection changes in the file Treeview.
+
+        When a leaf (instance) node is selected, updates
+        ``current_index`` and loads the corresponding file.
+
+        Args:
+            event: Tkinter event object (unused except for signature).
+        """
         sel = self.file_tree.selection()
         if not sel:
             return
@@ -497,35 +572,69 @@ class DICOMViewer(tk.Tk):
     # ----------------------------
 
     def _clear_file_filter(self):
+        """Clear the file tree filter and rebuild the file tree."""
         self.file_filter_var.set("")
         self._apply_file_filter()
 
     def _on_file_filter_change(self, event=None):
+        """Callback for changes in the file filter entry.
+
+        Debounces are not used here; any key release triggers a full
+        tree rebuild.
+
+        Args:
+            event: Tkinter event object, or ``None`` when called
+                programmatically.
+        """
         self._apply_file_filter()
 
     def _apply_file_filter(self):
+        """Apply the current file filter to the file tree.
+
+        Rebuilds the hierarchical file tree based on the filter pattern
+        in ``file_filter_var``. If no folder is loaded, does nothing.
+        """
         # With hierarchical Treeview, we rebuild the tree based on pattern
         if not self.folder:
             return
         self._populate_file_tree()
 
     def _clear_header_filter(self):
+        """Clear the header filter and rebuild the header tree."""
         self.header_filter_var.set("")
         self._rebuild_header_tree()
 
     def _on_header_filter_change(self, event=None):
+        """Callback for changes in the header filter entry.
+
+        Debounces updates: rebuilds the header tree 150 ms after the
+        last keypress.
+
+        Args:
+            event: Tkinter event object, or ``None`` when called
+                programmatically.
+        """
         # Debounce: wait 150ms after last key press
         if self._header_filter_after_id is not None:
             self.after_cancel(self._header_filter_after_id)
         self._header_filter_after_id = self.after(150, self._rebuild_header_tree)
 
     def _on_header_scope_change(self, event=None):
+        """Handle changes in the header scope selection."""
         self._rebuild_header_tree()
 
     def _on_expand_all_toggle(self):
+        """Toggle expand/collapse state for all header tree nodes."""
         self._set_tree_open_all(self.header_expand_all.get())
 
     def _set_tree_open_all(self, open_flag):
+        """Recursively set open/closed state for all nodes in header tree.
+
+        Args:
+            open_flag (bool): If ``True``, expand all nodes; otherwise,
+                collapse all nodes.
+        """
+
         def set_node(n):
             try:
                 self.hdr_tree.item(n, open=open_flag)
@@ -538,10 +647,18 @@ class DICOMViewer(tk.Tk):
             set_node(root)
 
     def _on_file_expand_all_toggle(self):
+        """Toggle expand/collapse state for all nodes in the file tree."""
         # Toggle all nodes in the left file tree based on the checkbox
         self._set_file_tree_open_all(self.file_expand_all.get())
 
     def _set_file_tree_open_all(self, open_flag):
+        """Recursively set open/closed state for all nodes in file tree.
+
+        Args:
+            open_flag (bool): If ``True``, expand all nodes; otherwise,
+                collapse all nodes.
+        """
+
         def set_node(n):
             try:
                 self.file_tree.item(n, open=open_flag)
@@ -554,9 +671,14 @@ class DICOMViewer(tk.Tk):
             set_node(root)
 
     def _populate_file_tree(self):
-        """
-        Populate the Treeview from self.series_hierarchy and filter pattern.
-        We treat only instance nodes as selectable files (leaf nodes).
+        """Populate the file Treeview from the series hierarchy.
+
+        Rebuilds the entire study/series/instance tree based on
+        ``series_hierarchy`` and the current filter pattern. Only
+        instance nodes (leaf nodes) are selectable and mapped to file
+        paths.
+
+        Preserves the previously selected file when possible.
         """
         # Save current selected path to reselect later if possible
         current_path = None
@@ -712,7 +834,14 @@ class DICOMViewer(tk.Tk):
                 self.hdr_tree.delete(item)
 
     def _select_tree_item_by_path(self, path):
-        """Find the Treeview item that maps to path and select it."""
+        """Select the Treeview leaf corresponding to a given file path.
+
+        Expands all ancestor nodes so the leaf is visible and triggers
+        loading of the corresponding file.
+
+        Args:
+            path (str): Absolute path to the DICOM file to select.
+        """
         for item_id, p in self.tree_item_to_path.items():
             if p == path:
                 # Ensure all parents are opened
@@ -730,13 +859,23 @@ class DICOMViewer(tk.Tk):
     # ----------------------------
 
     def open_folder(self):
+        """Show a folder selection dialog and load the chosen folder."""
         folder = filedialog.askdirectory(title="Select folder with DICOM files")
         if not folder:
             return
         self.load_folder(folder)
 
     def load_folder(self, folder):
-        """Start loading a folder in a background thread."""
+        """Start loading a folder of DICOM files in a background thread.
+
+        This method resets internal caches, updates status, and launches
+        a worker thread to scan for DICOM files and build the study/
+        series/instance hierarchy.
+
+        Args:
+            folder (str): Path to the folder to scan recursively for
+                DICOM files.
+        """
         self.folder = folder
         self.metadata_cache = {}
         self.pixel_cache = LRUCache(max_items=8)
@@ -773,8 +912,16 @@ class DICOMViewer(tk.Tk):
         threading.Thread(target=worker, daemon=True).start()
 
     def _scan_dicom_files(self, folder):
-        """
-        Scan folder recursively and collect DICOM files.
+        """Recursively scan a folder and collect DICOM files.
+
+        Uses file extensions and a lightweight signature check via
+        ``is_dicom_file`` to decide which files are likely DICOM.
+
+        Args:
+            folder (str): Root folder to scan.
+
+        Returns:
+            list[str]: Sorted list of absolute paths to DICOM files.
         """
         out = []
 
@@ -800,9 +947,27 @@ class DICOMViewer(tk.Tk):
         return out
 
     def _build_series_hierarchy_thread(self, files):
-        """
-        Build series_hierarchy and metadata_cache in a worker thread.
-        No Tk calls here.
+        """Build study/series/instance hierarchy in a worker thread.
+
+        Reads minimal DICOM metadata (without pixel data) for each
+        supplied path and organises files into a nested dictionary
+        structure:
+
+        - study UID → series UID → list of instances.
+
+        This method performs no Tkinter calls and is safe to run in a
+        background thread.
+
+        Args:
+            files (list[str]): List of absolute file paths to consider.
+
+        Returns:
+            tuple[dict, dict]: A tuple ``(series_hierarchy, metadata_cache)``,
+            where:
+
+            - ``series_hierarchy`` is the nested structure.
+            - ``metadata_cache`` maps file paths to DICOM datasets
+              (without pixel data).
         """
         series_hierarchy = {}
         metadata_cache = {}
@@ -867,7 +1032,18 @@ class DICOMViewer(tk.Tk):
         return series_hierarchy, metadata_cache
 
     def _finish_load_folder(self, folder, files, series_hierarchy, metadata_cache):
-        """Called on the main thread when worker is done."""
+        """Finalize folder loading on the main thread.
+
+        Updates internal state, repopulates the file tree, resets the
+        header tree and image canvas, and shows a status message.
+
+        Args:
+            folder (str): Path of the folder that was scanned.
+            files (list[str]): List of discovered DICOM file paths.
+            series_hierarchy (dict): Built hierarchy for the files.
+            metadata_cache (dict[str, pydicom.Dataset]): Metadata cache
+                for the discovered files.
+        """
         # Re-enable Open button
         self.btn_open.config(state="normal")
 
@@ -907,11 +1083,16 @@ class DICOMViewer(tk.Tk):
             )
 
     def _build_series_hierarchy(self):
-        """
-        Scan self.files and build hierarchical structure:
-        Study (StudyInstanceUID/StudyDescription) →
-            Series (SeriesInstanceUID/SeriesNumber/SeriesDescription) →
-                Instances (InstanceNumber, file path).
+        """Build the series hierarchy from ``self.files`` on the main thread.
+
+        Uses the existing ``metadata_cache`` when present, otherwise
+        reads minimal metadata for each file and constructs:
+
+        - Study (by StudyInstanceUID/StudyDescription) →
+          Series (SeriesInstanceUID/SeriesNumber/SeriesDescription) →
+          Instances (InstanceNumber, file path).
+
+        Populates ``self.series_hierarchy`` in place.
         """
         self.series_hierarchy = {}
 
@@ -982,6 +1163,12 @@ class DICOMViewer(tk.Tk):
     # ----------------------------
 
     def select_index(self, idx):
+        """Select a file by index in ``filtered_files`` and load it.
+
+        Args:
+            idx (int): Zero-based index into ``filtered_files``. If out
+                of range, the call is ignored.
+        """
         if idx < 0 or idx >= len(self.filtered_files):
             return
         self.current_index = idx
@@ -989,26 +1176,47 @@ class DICOMViewer(tk.Tk):
         self._select_tree_item_by_path(path)
 
     def next_file(self):
+        """Advance to the next file in ``filtered_files`` if possible."""
         if self.current_index < len(self.filtered_files) - 1:
             self.select_index(self.current_index + 1)
 
     def prev_file(self):
+        """Go back to the previous file in ``filtered_files`` if possible."""
         if self.current_index > 0:
             self.select_index(self.current_index - 1)
 
     def _on_key_up(self, event):
+        """Handle Up-arrow key: select the previous file if available.
+
+        Args:
+            event: Tkinter event object.
+        """
         if self.current_index > 0:
             self.select_index(self.current_index - 1)
 
     def _on_key_down(self, event):
+        """Handle Down-arrow key: select the next file if available.
+
+        Args:
+            event: Tkinter event object.
+        """
         if self.current_index < len(self.filtered_files) - 1:
             self.select_index(self.current_index + 1)
 
     # ----------------------------
     # Frame navigation (multi-frame) via buttons
     # ----------------------------
-
     def _update_frame_controls(self, current, total):
+        """Update frame navigation widgets to reflect the current frame.
+
+        Synchronizes the frame label, slider range/value, and
+        enable/disable state of the previous/next buttons.
+
+        Args:
+            current (int): One-based index of the currently selected
+                frame.
+            total (int): Total number of frames available.
+        """
         current = int(current)
         total = int(total)
         # Update label
@@ -1039,6 +1247,13 @@ class DICOMViewer(tk.Tk):
             )
 
     def next_frame(self):
+        """Advance to the next frame in the current DICOM dataset.
+
+        If a multi-frame dataset is loaded and a next frame exists,
+        updates ``current_frame_index``, clears any ROI, updates the
+        frame controls, re-renders the image, and optionally rebuilds
+        the header tree if it is linked to the current frame.
+        """
         if not self.current_ds:
             return
         total = int(getattr(self.current_ds, "NumberOfFrames", 1))
@@ -1056,6 +1271,13 @@ class DICOMViewer(tk.Tk):
             self._rebuild_header_tree()
 
     def prev_frame(self):
+        """Go back to the previous frame in the current DICOM dataset.
+
+        If a multi-frame dataset is loaded and a previous frame exists,
+        updates ``current_frame_index``, clears any ROI, updates the
+        frame controls, re-renders the image, and optionally rebuilds
+        the header tree if it is linked to the current frame.
+        """
         if not self.current_ds:
             return
         total = int(getattr(self.current_ds, "NumberOfFrames", 1))
@@ -1073,9 +1295,17 @@ class DICOMViewer(tk.Tk):
             self._rebuild_header_tree()
 
     def _on_frame_slider_change(self, value):
-        """
-        Called when user drags the frame slider.
-        Value is a float; convert to int frame index (0-based).
+        """Handle user interaction with the frame slider.
+
+        Converts the slider's floating-point value to a one-based frame
+        number, clamps to the valid range, updates the current frame
+        index, clears any ROI, updates frame controls, and re-renders
+        the image. Optionally rebuilds the header tree if it is linked
+        to the current frame.
+
+        Args:
+            value (float | str): Slider value as provided by Tkinter
+                (stringified float).
         """
         if not self.current_ds:
             return
@@ -1109,6 +1339,16 @@ class DICOMViewer(tk.Tk):
 
     # Mouse wheel can still change frames (optional)
     def _on_mouse_wheel(self, event):
+        """Handle mouse wheel events for frame navigation.
+
+        When a multi-frame dataset is loaded, uses the mouse wheel to
+        step forwards or backwards through frames, wrapping around at
+        the ends. Also triggers a quick interactive canvas redraw and
+        schedules a high-quality redraw.
+
+        Args:
+            event: Tkinter mouse wheel event.
+        """
         self._interactive_resize = True
         self._update_canvas_image()
         # You can schedule a “relax” high-quality redraw shortly after:
@@ -1128,6 +1368,17 @@ class DICOMViewer(tk.Tk):
     # ----------------------------
 
     def _on_mouse_wheel_zoom(self, event):
+        """Handle mouse wheel events for zooming the displayed image.
+
+        Adjusts the user zoom factor up or down, clamps it to a
+        reasonable range, updates pan offsets so the zoom is centered
+        around the mouse position, and triggers a canvas redraw. Uses
+        a lower-quality resampling during interaction and schedules a
+        final high-quality redraw afterwards.
+
+        Args:
+            event: Tkinter mouse wheel event.
+        """
         self._interactive_resize = True
         self._update_canvas_image()
         # You can schedule a “relax” high-quality redraw shortly after:
@@ -1173,10 +1424,23 @@ class DICOMViewer(tk.Tk):
         self._update_canvas_image()
 
     def _finish_interactive_zoom(self):
+        """Perform a final high-quality redraw after interactive zoom.
+
+        Resets the interactive resize flag and re-renders the canvas
+        using high-quality resampling.
+        """
         self._interactive_resize = False
         self._update_canvas_image()  # final high-quality redraw
 
     def _on_pan_start(self, event):
+        """Start a pan gesture with the left mouse button.
+
+        Records the starting mouse position and current pan offsets to
+        allow incremental pan updates while dragging.
+
+        Args:
+            event: Tkinter mouse button press event.
+        """
         self._interactive_resize = True
         if self.current_image_pil is None:
             return
@@ -1186,6 +1450,11 @@ class DICOMViewer(tk.Tk):
         self._drag_start_pan_y = self.pan_y
 
     def _on_pan_move(self, event):
+        """Update pan offsets while the user drags the mouse.
+
+        Args:
+            event: Tkinter mouse motion event while button is held.
+        """
         if self._drag_start_x is None or self.current_image_pil is None:
             return
 
@@ -1198,6 +1467,14 @@ class DICOMViewer(tk.Tk):
         self._update_canvas_image()
 
     def _on_pan_end(self, event):
+        """Finish a pan gesture and perform a final redraw.
+
+        Clears drag state and re-renders the canvas with high-quality
+        resampling.
+
+        Args:
+            event: Tkinter mouse button release event.
+        """
         self._interactive_resize = False
         self._update_canvas_image()  # final high-quality redraw
         self._drag_start_x = None
@@ -1206,6 +1483,11 @@ class DICOMViewer(tk.Tk):
         self._drag_start_pan_y = None
 
     def _on_reset_zoom_pan(self, event):
+        """Reset zoom and pan to defaults and redraw the image.
+
+        Args:
+            event: Tkinter mouse double-click event (unused).
+        """
         self.zoom = 1.0
         self.pan_x = 0.0
         self.pan_y = 0.0
@@ -1216,7 +1498,15 @@ class DICOMViewer(tk.Tk):
     # ----------------------------
 
     def _effective_zoom(self):
-        """Effective zoom in canvas pixels per image pixel, combining fit-to-window and user zoom."""
+        """Compute the effective zoom factor in canvas pixels per image pixel.
+
+        Combines the fit-to-window scale (so the entire image fits in
+        the canvas) with the user-defined zoom factor.
+
+        Returns:
+            float: Effective zoom factor (canvas pixels per image pixel),
+            clamped to a small positive value.
+        """
         if self.current_image_pil is None:
             return 1.0
         canvas_w = max(1, self.canvas.winfo_width())
@@ -1226,7 +1516,23 @@ class DICOMViewer(tk.Tk):
         return max(0.0001, scale_to_fit * max(self.zoom, 0.1))
 
     def _get_image_bbox_on_canvas(self):
-        """Return (x0, y0, x1, y1, z_eff) of the image on the canvas and effective zoom."""
+        """Return the image bounding box on the canvas and effective zoom.
+
+        Computes where (and at what size) the current image will be
+        drawn on the canvas, after applying effective zoom and pan.
+
+        Returns:
+            tuple[float, float, float, float, float] | None: A tuple
+            ``(x0, y0, x1, y1, z)`` where:
+
+            - ``x0, y0`` – top-left corner of the image on the canvas.
+            - ``x1, y1`` – bottom-right corner of the image on the canvas.
+            - ``z`` – effective zoom factor (canvas pixels per image
+              pixel).
+
+            Returns ``None`` if no image is loaded or the zoom would
+            result in less than one pixel in either dimension.
+        """
         if self.current_image_pil is None:
             return None
 
@@ -1252,7 +1558,20 @@ class DICOMViewer(tk.Tk):
         return (x0, y0, x1, y1, z)
 
     def _canvas_to_image_coords(self, x, y):
-        """Convert canvas coords to image pixel (i, j). Return None if outside."""
+        """Convert canvas coordinates to image pixel indices.
+
+        Converts a canvas position into integer image coordinates
+        ``(i, j)`` using the current zoom, pan, and image placement.
+        Returns ``None`` if the point lies outside the image.
+
+        Args:
+            x (float): X coordinate in canvas space.
+            y (float): Y coordinate in canvas space.
+
+        Returns:
+            tuple[int, int] | None: Image pixel coordinates
+            ``(i, j)`` if inside the image bounds, otherwise ``None``.
+        """
         bbox = self._get_image_bbox_on_canvas()
         if bbox is None:
             return None
@@ -1271,6 +1590,16 @@ class DICOMViewer(tk.Tk):
         return i, j
 
     def _update_canvas_image(self):
+        """Redraw the current image and all overlays on the canvas.
+
+        Resizes the current PIL image according to the effective zoom,
+        applies pan offsets, draws the image on the canvas, and then
+        draws all overlays (crosshair, ROI, diffusion, metadata) on
+        top.
+
+        Uses bilinear resampling for smoother interactive updates and
+        Lanczos resampling for final/high-quality redraws.
+        """
         self.canvas.delete("all")
         if self.current_image_pil is None:
             return
@@ -1314,6 +1643,18 @@ class DICOMViewer(tk.Tk):
     # ----------------------------
 
     def load_file(self, path):
+        """Load a single DICOM file, decode pixels, and display the image.
+
+        Uses the metadata cache if available, otherwise reads the
+        dataset from disk. Ensures that pixel data is present, caches
+        decoded pixel arrays, resets ROI and viewing state, initializes
+        default window/level, and renders the first frame.
+
+        Also updates status text and rebuilds the header tree.
+
+        Args:
+            path (str): Absolute path to the DICOM file to load.
+        """
         # Try use cached metadata first
         ds = self.metadata_cache.get(path)
         try:
@@ -1369,6 +1710,12 @@ class DICOMViewer(tk.Tk):
         self._rebuild_header_tree()
 
     def _sync_wl_controls(self):
+        """Synchronize window/level sliders with the current WL values.
+
+        Uses current window center/width if set, otherwise falls back
+        to the default window/level. Adjusts slider ranges and positions
+        accordingly.
+        """
         if self.window_center is None:
             c = self._default_window_center or 40.0
         else:
@@ -1385,6 +1732,21 @@ class DICOMViewer(tk.Tk):
         self.window_slider.set(w)
 
     def _init_default_window_level(self, ds):
+        """Determine default window center/width for a dataset.
+
+        Attempts to use the DICOM ``WindowCenter`` and ``WindowWidth``
+        attributes (taking the first value if multi-valued). If those
+        are absent or invalid, falls back to computing a robust
+        intensity range from the pixel data (1st–99th percentiles),
+        optionally after applying a modality LUT.
+
+        Sets ``_default_window_center`` and ``_default_window_width`` on
+        the instance.
+
+        Args:
+            ds (pydicom.Dataset): DICOM dataset for which to derive
+                default window/level.
+        """
         wc = getattr(ds, "WindowCenter", None)
         ww = getattr(ds, "WindowWidth", None)
 
@@ -1424,6 +1786,17 @@ class DICOMViewer(tk.Tk):
             self._default_window_width = 400.0
 
     def _render_image(self):
+        """Render the current frame of the loaded DICOM dataset.
+
+        Prepares per-frame cached arrays for pixel readout (raw and
+        modality-transformed), then calls ``dicom_to_display_image`` to
+        obtain a display-ready PIL image based on the current window/
+        level. Updates ``current_image_pil`` and triggers a canvas
+        redraw.
+
+        On error, clears the canvas and shows an error message instead
+        of the image.
+        """
         if not self.current_ds:
             return
 
@@ -1480,6 +1853,19 @@ class DICOMViewer(tk.Tk):
     # ----------------------------
 
     def _rebuild_header_tree(self):
+        """Rebuild the DICOM header Treeview according to scope and filter.
+
+        Clears the existing header tree and repopulates it based on:
+
+        - The selected scope (dataset, shared functional groups, or
+          frame-scoped variants).
+        - The current filter text (case-insensitive substring match).
+        - The current frame index for frame-based scopes.
+
+        Applies the expand/collapse state according to
+        ``header_expand_all``.
+        """
+
         # Clear tree
         for item in self.hdr_tree.get_children():
             self.hdr_tree.delete(item)
@@ -1609,6 +1995,19 @@ class DICOMViewer(tk.Tk):
         self._set_tree_open_all(self.header_expand_all.get())
 
     def _insert_summary(self, root, pattern, open_flag):
+        """Insert a high-level summary node under the header tree root.
+
+        Adds a synthetic "Summary" node with a handful of commonly
+        inspected tags (patient, study, series identifiers). Applies
+        the header filter to decide which of these summary entries are
+        shown.
+
+        Args:
+            root: Treeview item ID of the parent node.
+            pattern (str): Lowercased filter pattern.
+            open_flag (bool): Whether to initially expand the summary
+                node.
+        """
         summary = [
             ("(0010,0010)", "PatientName", getattr(self.current_ds, "PatientName", "")),
             ("(0010,0020)", "PatientID", getattr(self.current_ds, "PatientID", "")),
@@ -1656,7 +2055,27 @@ class DICOMViewer(tk.Tk):
             self.hdr_tree.delete(sum_root)
 
     def _insert_dataset_recursive(self, parent_id, dataset, pattern, open_flag):
-        """Recursively insert dataset elements. Prune nodes that do not match filter."""
+        """Recursively insert dataset elements into the header tree.
+
+        Traverses a DICOM dataset, inserting each element into the
+        Treeview under ``parent_id``. For sequence (SQ) elements, it
+        inserts a sequence node and recurses into each item. Nodes that
+        do not match the filter pattern (and have no matching children)
+        are pruned.
+
+        Args:
+            parent_id: Treeview item ID of the parent node.
+            dataset (pydicom.Dataset): Dataset or sequence item to
+                insert.
+            pattern (str): Lowercased search pattern for filtering.
+            open_flag (bool): Whether newly created nodes should be
+                expanded by default.
+
+        Returns:
+            bool: ``True`` if at least one node was inserted under
+            ``parent_id`` (either directly or via children); otherwise
+            ``False``.
+        """
         inserted_any = False
         for elem in dataset:
             if elem.VR == "SQ":
@@ -1719,6 +2138,20 @@ class DICOMViewer(tk.Tk):
         return inserted_any
 
     def _matches(self, pattern, fields):
+        """Return whether any of the provided fields matches the pattern.
+
+        Performs a case-insensitive substring search of ``pattern`` in
+        the given iterable of fields, skipping ``None`` values.
+
+        Args:
+            pattern (str): Lowercased filter pattern. Empty string
+                matches everything.
+            fields (Iterable[Any]): Values to test against the pattern.
+
+        Returns:
+            bool: ``True`` if ``pattern`` is empty or found in any
+            non-``None`` field; otherwise ``False``.
+        """
         if pattern == "":
             return True
         try:
@@ -1736,7 +2169,27 @@ class DICOMViewer(tk.Tk):
     # ----------------------------
 
     def _get_diffusion_info_for_current_frame(self):
-        """Extract diffusion info (b-value, directionality, gradient vector) for current frame."""
+        """Extract diffusion info for the current frame, if available.
+
+        Tries to obtain diffusion-related metadata (b-value, direction-
+        ality, gradient vector) from:
+
+        1. Per-frame functional groups, then
+        2. Shared functional groups, then
+        3. The root dataset (for older vendor-specific headers).
+
+        Uses both standard and some known private tags (e.g. Siemens
+        ``[B_value]``) as fallbacks.
+
+        Returns:
+            dict[str, str] | None: A dictionary with keys:
+
+            - ``"b"``: b-value, formatted as string.
+            - ``"dir"``: diffusion directionality string.
+            - ``"grad"``: formatted gradient vector, or ``"n/a"``.
+
+            Returns ``None`` if no diffusion information is found.
+        """
         ds = self.current_ds
         if ds is None:
             return None
@@ -1848,7 +2301,13 @@ class DICOMViewer(tk.Tk):
         return {"b": b_str, "dir": d_str, "grad": g_str}
 
     def _draw_diffusion_overlay(self):
-        """Draw diffusion info text at the bottom-left of the displayed image."""
+        """Draw diffusion info overlay in the bottom-left of the image.
+
+        Uses diffusion metadata extracted by
+        ``_get_diffusion_info_for_current_frame`` and renders a small
+        label (currently showing b-value only) inside the image bounds
+        at the bottom-left corner, with a styled background rectangle.
+        """
         if self.current_image_pil is None:
             return
         info = self._get_diffusion_info_for_current_frame()
@@ -1897,7 +2356,7 @@ class DICOMViewer(tk.Tk):
     # ----------------------------
     # Basic DICOM metadata overlay (right-aligned vertical stack)
     # ----------------------------
-
+    # TODO continue adding docstrings here.
     def _get_basic_metadata_lines(self):
         ds = self.current_ds
         if ds is None:
