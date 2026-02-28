@@ -290,6 +290,17 @@ class DICOMViewer(tk.Tk):
         self.lbl_cursor.pack(side=tk.RIGHT, padx=(12, 0))
         self.lbl_status.pack(side=tk.RIGHT)
 
+        # Bottom status bar
+        status_bar = ttk.Frame(self, relief="sunken", borderwidth=1)
+        status_bar.pack(side=tk.BOTTOM, fill=tk.X)
+        self.status_bar_label = ttk.Label(status_bar, text="Ready", anchor="w")
+        self.status_bar_label.pack(side=tk.LEFT, fill=tk.X, expand=True, padx=6, pady=2)
+        self.status_bar_progress = ttk.Progressbar(
+            status_bar, orient="horizontal", length=200, mode="determinate"
+        )
+        self.status_bar_progress.pack(side=tk.RIGHT, padx=(6, 6), pady=2)
+        self.status_bar_progress.pack_forget()  # hidden until loading starts
+
         # Main Paned Window
         main_pane = ttk.Panedwindow(self, orient=tk.HORIZONTAL)
         main_pane.pack(fill=tk.BOTH, expand=True)
@@ -880,19 +891,43 @@ class DICOMViewer(tk.Tk):
         self.metadata_cache = {}
         self.pixel_cache = LRUCache(max_items=8)
 
-        # Show initial status in the toolbar and force a repaint
-        self.lbl_status.config(text=f"{folder} — scanning for DICOM files...")
+        # Show progress in the bottom status bar
+        self.status_bar_label.config(text=f"{folder} — scanning for DICOM files...")
+        self.status_bar_progress.config(mode="indeterminate", maximum=100)
+        self.status_bar_progress.pack(side=tk.RIGHT, padx=(6, 6), pady=2)
+        self.status_bar_progress.start(15)
         self.update_idletasks()
 
-        # Disable Open button while working (optional)
+        # Disable Open button while working
         self.btn_open.config(state="disabled")
 
         def worker():
             # This runs in a background thread - NO direct Tk calls here!
             try:
                 files = self._scan_dicom_files(folder)
+                total = len(files)
+
+                # Switch to determinate progress now that we know total
+                def _start_determinate(total=total):
+                    self.status_bar_progress.stop()
+                    self.status_bar_progress.config(mode="determinate", maximum=max(total, 1), value=0)
+                    self.status_bar_label.config(text=f"Loading DICOM metadata: 0 / {total}")
+
+                self.after(0, _start_determinate)
+
+                def progress_cb(i, total=total):
+                    self.after(
+                        0,
+                        lambda i=i: (
+                            self.status_bar_progress.config(value=i),
+                            self.status_bar_label.config(
+                                text=f"Loading DICOM metadata: {i} / {total}"
+                            ),
+                        ),
+                    )
+
                 series_hierarchy, metadata_cache = self._build_series_hierarchy_thread(
-                    files
+                    files, progress_cb
                 )
             except Exception as e:
                 # Report error on main thread
@@ -946,7 +981,7 @@ class DICOMViewer(tk.Tk):
         out.sort()
         return out
 
-    def _build_series_hierarchy_thread(self, files):
+    def _build_series_hierarchy_thread(self, files, progress_cb=None):
         """Build study/series/instance hierarchy in a worker thread.
 
         Reads minimal DICOM metadata (without pixel data) for each
@@ -960,6 +995,11 @@ class DICOMViewer(tk.Tk):
 
         Args:
             files (list[str]): List of absolute file paths to consider.
+            progress_cb (callable | None): Optional callback
+                ``progress_cb(i)`` called after each file is processed,
+                where ``i`` is the 1-based count of files processed so
+                far. Called from the background thread via
+                ``self.after``.
 
         Returns:
             tuple[dict, dict]: A tuple ``(series_hierarchy, metadata_cache)``,
@@ -972,12 +1012,17 @@ class DICOMViewer(tk.Tk):
         series_hierarchy = {}
         metadata_cache = {}
 
-        for path in files:
+        for idx, path in enumerate(files, start=1):
             try:
                 ds = pydicom.dcmread(path, stop_before_pixels=True, force=True)
                 metadata_cache[path] = ds
             except Exception:
+                if progress_cb is not None:
+                    progress_cb(idx)
                 continue
+
+            if progress_cb is not None:
+                progress_cb(idx)
 
             study_uid = getattr(ds, "StudyInstanceUID", None) or "unknown-study"
             series_uid = getattr(ds, "SeriesInstanceUID", None) or "unknown-series"
@@ -1047,6 +1092,14 @@ class DICOMViewer(tk.Tk):
         # Re-enable Open button
         self.btn_open.config(state="normal")
 
+        # Stop / hide progress bar and update status bar
+        self.status_bar_progress.stop()
+        self.status_bar_progress.pack_forget()
+        count = len(files)
+        self.status_bar_label.config(
+            text=f"{folder} — {count} DICOM file(s) loaded"
+        )
+
         # Update internal state
         self.files = files
         self.series_hierarchy = series_hierarchy
@@ -1061,10 +1114,6 @@ class DICOMViewer(tk.Tk):
                 self.file_tree.delete(item)
             self.tree_item_to_path.clear()
 
-        count = len(self.files)
-
-        # FINAL status text – this WILL be visible now
-        self.lbl_status.config(text=f"{folder} — {count} DICOM file(s) loaded")
         self.update_idletasks()
 
         self.current_index = -1
