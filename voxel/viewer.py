@@ -910,8 +910,12 @@ class DICOMViewer(tk.Tk):
                 # Switch to determinate progress now that we know total
                 def _start_determinate(total=total):
                     self.status_bar_progress.stop()
-                    self.status_bar_progress.config(mode="determinate", maximum=max(total, 1), value=0)
-                    self.status_bar_label.config(text=f"Loading DICOM metadata: 0 / {total}")
+                    self.status_bar_progress.config(
+                        mode="determinate", maximum=max(total, 1), value=0
+                    )
+                    self.status_bar_label.config(
+                        text=f"Loading DICOM metadata: 0 / {total}"
+                    )
 
                 self.after(0, _start_determinate)
 
@@ -1096,9 +1100,7 @@ class DICOMViewer(tk.Tk):
         self.status_bar_progress.stop()
         self.status_bar_progress.pack_forget()
         count = len(files)
-        self.status_bar_label.config(
-            text=f"{folder} — {count} DICOM file(s) loaded"
-        )
+        self.status_bar_label.config(text=f"{folder} — {count} DICOM file(s) loaded")
 
         # Update internal state
         self.files = files
