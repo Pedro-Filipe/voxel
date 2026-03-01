@@ -3,6 +3,7 @@ import threading
 import sys
 
 import tkinter as tk
+import tkinter.font as tkfont
 from tkinter import ttk, filedialog, messagebox
 from PIL import Image, ImageTk, Image as PILImage
 import numpy as np
@@ -101,6 +102,26 @@ class DICOMViewer(tk.Tk):
         shortcuts and mouse handlers.
         """
         super().__init__()
+
+        # Reduce GUI panel font size by 2 pt.
+        # Canvas overlay fonts use explicit size tuples and are unaffected.
+        for name in (
+            "TkDefaultFont",
+            "TkTextFont",
+            "TkFixedFont",
+            "TkMenuFont",
+            "TkHeadingFont",
+            "TkCaptionFont",
+            "TkSmallCaptionFont",
+            "TkIconFont",
+            "TkTooltipFont",
+        ):
+            try:
+                f = tkfont.nametofont(name)
+                f.configure(size=max(6, f.cget("size") - 2))
+            except Exception:
+                pass
+
         self.title(APP_NAME)
         self.geometry("1200x800")
         self.minsize(900, 600)
@@ -2384,7 +2405,7 @@ class DICOMViewer(tk.Tk):
             text=text,
             fill="#00e0ff",
             anchor="sw",  # bottom-left anchor
-            font=("TkDefaultFont", 10, "bold"),
+            font=("TkDefaultFont", 8, "bold"),
             tags="overlay",
         )
         try:
@@ -2457,7 +2478,7 @@ class DICOMViewer(tk.Tk):
                 text=line,
                 fill="#00e0ff",
                 anchor="ne",
-                font=("TkDefaultFont", 10, "bold"),
+                font=("TkDefaultFont", 8, "bold"),
                 tags="overlay",
             )
             try:
@@ -2599,7 +2620,7 @@ class DICOMViewer(tk.Tk):
             text=text,
             fill="white",
             anchor="nw",
-            font=("TkDefaultFont", 9),
+            font=("TkDefaultFont", 8),
             tags="overlay",
         )
         try:
@@ -2981,7 +3002,7 @@ class DICOMViewer(tk.Tk):
                     text=text,
                     fill="black",
                     anchor="n",
-                    font=("TkDefaultFont", 9),
+                    font=("TkDefaultFont", 8),
                     tags=("roi",),
                 )
                 xA, yA, xB, yB = self.canvas.bbox(tid)

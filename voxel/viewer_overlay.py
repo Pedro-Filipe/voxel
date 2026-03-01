@@ -60,7 +60,7 @@ class OverlayMixin:
             text=text,
             fill="white",
             anchor="nw",
-            font=("TkDefaultFont", 9),
+            font=("TkDefaultFont", 8),
             tags="overlay",
         )
         try:
@@ -320,7 +320,7 @@ class OverlayMixin:
             text=text,
             fill="#00e0ff",
             anchor="sw",
-            font=("TkDefaultFont", 10, "bold"),
+            font=("TkDefaultFont", 8, "bold"),
             tags="overlay",
         )
         try:
@@ -389,7 +389,7 @@ class OverlayMixin:
                 text=line,
                 fill="#00e0ff",
                 anchor="ne",
-                font=("TkDefaultFont", 10, "bold"),
+                font=("TkDefaultFont", 8, "bold"),
                 tags="overlay",
             )
             try:

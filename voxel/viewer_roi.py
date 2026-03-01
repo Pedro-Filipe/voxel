@@ -307,7 +307,7 @@ class ROIMixin:
                     text=text,
                     fill="black",
                     anchor="n",
-                    font=("TkDefaultFont", 9),
+                    font=("TkDefaultFont", 8),
                     tags=("roi",),
                 )
                 xA, yA, xB, yB = self.canvas.bbox(tid)
