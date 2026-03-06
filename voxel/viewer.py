@@ -1,6 +1,7 @@
 import os
 import threading
 import sys
+import shutil
 
 import tkinter as tk
 import tkinter.font as tkfont
@@ -258,6 +259,10 @@ class DICOMViewer(tk.Tk):
         menubar = tk.Menu(self)
         filemenu = tk.Menu(menubar, tearoff=0)
         filemenu.add_command(label="Open Folder\tCtrl+O", command=self.open_folder)
+        filemenu.add_command(
+            label="Copy Selected DICOMs...\tCtrl+Shift+C",
+            command=self.copy_selected_dicoms,
+        )
         filemenu.add_separator()
         filemenu.add_command(label="Exit", command=self.quit)
         menubar.add_cascade(label="File", menu=filemenu)
@@ -357,12 +362,19 @@ class DICOMViewer(tk.Tk):
             command=self._on_file_expand_all_toggle,
         ).pack(side=tk.LEFT)
 
+        self.btn_copy_selected = ttk.Button(
+            file_tree_ctrl_frame,
+            text="Copy selected...",
+            command=self.copy_selected_dicoms,
+        )
+        self.btn_copy_selected.pack(side=tk.RIGHT)
+
         # Hierarchical Treeview for Study → Series → Instance
         self.file_tree = ttk.Treeview(
             left_frame,
             columns=("Info",),
             show="tree headings",
-            selectmode="browse",
+            selectmode="extended",
         )
         self.file_tree.heading("#0", text="Study / Series / Instance")
         self.file_tree.column("#0", width=260, anchor="w")
@@ -557,6 +569,7 @@ class DICOMViewer(tk.Tk):
         - ``r``: clear ROI.
         """
         self.bind("<Control-o>", lambda e: self.open_folder())
+        self.bind("<Control-Shift-C>", lambda e: self.copy_selected_dicoms())
         self.bind("<Left>", lambda e: self.prev_file())
         self.bind("<Right>", lambda e: self.next_file())
         self.bind("<Up>", self._on_key_up)
@@ -589,8 +602,19 @@ class DICOMViewer(tk.Tk):
         sel = self.file_tree.selection()
         if not sel:
             return
-        item_id = sel[0]
+        # Prefer the focused row; fall back to the most recently selected one.
+        item_id = self.file_tree.focus()
+        if item_id not in sel:
+            item_id = sel[-1]
+
         path = self.tree_item_to_path.get(item_id)
+        if not path:
+            # If only group nodes are selected, don't change the loaded image.
+            for candidate in reversed(sel):
+                candidate_path = self.tree_item_to_path.get(candidate)
+                if candidate_path:
+                    path = candidate_path
+                    break
         if not path:
             # Clicked on a non-leaf node (study or series)
             return
@@ -886,6 +910,113 @@ class DICOMViewer(tk.Tk):
                 self.load_file(path)
                 break
 
+    def _iter_leaf_paths_from_tree_item(self, item_id):
+        """Yield all leaf DICOM paths under a Treeview item.
+
+        Args:
+            item_id: Treeview item ID for a study, series, or instance.
+        """
+        path = self.tree_item_to_path.get(item_id)
+        if path:
+            yield path
+            return
+
+        for child in self.file_tree.get_children(item_id):
+            yield from self._iter_leaf_paths_from_tree_item(child)
+
+    def _get_selected_dicom_paths(self):
+        """Return deduplicated DICOM paths for the current tree selection."""
+        selected_items = self.file_tree.selection()
+        selected_paths = []
+        seen = set()
+
+        for item_id in selected_items:
+            for path in self._iter_leaf_paths_from_tree_item(item_id):
+                if path in seen:
+                    continue
+                seen.add(path)
+                selected_paths.append(path)
+
+        return selected_paths
+
+    def _build_copy_destination_path(self, source_path, target_folder):
+        """Build a destination path and avoid overwriting existing files."""
+        rel_path = None
+        if self.folder:
+            try:
+                candidate = os.path.relpath(source_path, self.folder)
+                if candidate != ".." and not candidate.startswith(f"..{os.sep}"):
+                    rel_path = candidate
+            except Exception:
+                rel_path = None
+
+        if not rel_path:
+            rel_path = os.path.basename(source_path)
+
+        destination = os.path.join(target_folder, rel_path)
+        stem, ext = os.path.splitext(destination)
+        suffix = 1
+        while os.path.exists(destination):
+            destination = f"{stem} ({suffix}){ext}"
+            suffix += 1
+
+        return destination
+
+    def copy_selected_dicoms(self):
+        """Copy selected DICOM files from the left panel to a target folder."""
+        selected_paths = self._get_selected_dicom_paths()
+        if not selected_paths:
+            messagebox.showinfo(
+                "Copy DICOMs",
+                "Select one or more DICOM instances (or series/studies) first.",
+            )
+            return
+
+        target_folder = filedialog.askdirectory(
+            title="Select destination folder for selected DICOM files"
+        )
+        if not target_folder:
+            return
+
+        copied = 0
+        failed = []
+        total = len(selected_paths)
+
+        self.status_bar_label.config(text=f"Copying {total} DICOM file(s)...")
+        self.update_idletasks()
+
+        for source_path in selected_paths:
+            try:
+                destination = self._build_copy_destination_path(
+                    source_path, target_folder
+                )
+                os.makedirs(os.path.dirname(destination), exist_ok=True)
+                shutil.copy2(source_path, destination)
+                copied += 1
+            except Exception as exc:
+                failed.append(f"{os.path.basename(source_path)}: {exc}")
+
+        self.status_bar_label.config(
+            text=f"Copied {copied}/{total} DICOM file(s) to {target_folder}"
+        )
+
+        if failed:
+            preview = "\n".join(failed[:10])
+            more = ""
+            if len(failed) > 10:
+                more = f"\n... and {len(failed) - 10} more"
+            messagebox.showwarning(
+                "Copy completed with errors",
+                f"Copied {copied} of {total} file(s) to:\n{target_folder}\n\n"
+                f"Failed files:\n{preview}{more}",
+            )
+            return
+
+        messagebox.showinfo(
+            "Copy completed",
+            f"Copied {copied} DICOM file(s) to:\n{target_folder}",
+        )
+
     # ----------------------------
     # Folder and file handling
     # ----------------------------
@@ -954,9 +1085,9 @@ class DICOMViewer(tk.Tk):
                 series_hierarchy, metadata_cache = self._build_series_hierarchy_thread(
                     files, progress_cb
                 )
-            except Exception as e:
+            except Exception as exc:
                 # Report error on main thread
-                self.after(0, lambda: messagebox.showerror("Error", str(e)))
+                self.after(0, lambda exc=exc: messagebox.showerror("Error", str(exc)))
                 files = []
                 series_hierarchy = {}
                 metadata_cache = {}
