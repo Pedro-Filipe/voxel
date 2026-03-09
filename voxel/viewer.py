@@ -364,7 +364,7 @@ class DICOMViewer(tk.Tk):
 
         self.btn_copy_selected = ttk.Button(
             file_tree_ctrl_frame,
-            text="Copy selected...",
+            text="Export selected...",
             command=self.copy_selected_dicoms,
         )
         self.btn_copy_selected.pack(side=tk.RIGHT)
@@ -940,24 +940,47 @@ class DICOMViewer(tk.Tk):
         return selected_paths
 
     def _build_copy_destination_path(self, source_path, target_folder):
-        """Build a destination path and avoid overwriting existing files."""
-        rel_path = None
-        if self.folder:
-            try:
-                candidate = os.path.relpath(source_path, self.folder)
-                if candidate != ".." and not candidate.startswith(f"..{os.sep}"):
-                    rel_path = candidate
-            except Exception:
-                rel_path = None
+        """Build a flat destination path with filename based on DICOM metadata."""
+        # Try to read DICOM metadata for filename
+        try:
+            ds = pydicom.dcmread(source_path, stop_before_pixels=True)
+            series_desc = getattr(ds, "SeriesDescription", "") or ""
+            series_num = getattr(ds, "SeriesNumber", None)
+            instance_num = getattr(ds, "InstanceNumber", None)
 
-        if not rel_path:
-            rel_path = os.path.basename(source_path)
+            # Build filename from metadata
+            parts = []
+            if series_desc:
+                # Sanitize series description for filename
+                safe_desc = "".join(
+                    c if c.isalnum() or c in (" ", "-", "_") else "_"
+                    for c in series_desc
+                )
+                safe_desc = safe_desc.strip().replace(" ", "_")
+                parts.append(safe_desc)
 
-        destination = os.path.join(target_folder, rel_path)
+            if series_num is not None:
+                parts.append(f"S{series_num:04d}")
+
+            if instance_num is not None:
+                parts.append(f"I{instance_num:04d}")
+
+            if parts:
+                filename = "_".join(parts) + ".dcm"
+            else:
+                filename = os.path.basename(source_path)
+        except Exception:
+            # Fallback to original filename if DICOM reading fails
+            filename = os.path.basename(source_path)
+
+        # Build full destination path (flat - all files in target folder)
+        destination = os.path.join(target_folder, filename)
+
+        # Handle filename collisions
         stem, ext = os.path.splitext(destination)
         suffix = 1
         while os.path.exists(destination):
-            destination = f"{stem} ({suffix}){ext}"
+            destination = f"{stem}_({suffix}){ext}"
             suffix += 1
 
         return destination
@@ -990,7 +1013,6 @@ class DICOMViewer(tk.Tk):
                 destination = self._build_copy_destination_path(
                     source_path, target_folder
                 )
-                os.makedirs(os.path.dirname(destination), exist_ok=True)
                 shutil.copy2(source_path, destination)
                 copied += 1
             except Exception as exc:
