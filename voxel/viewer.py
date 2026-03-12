@@ -2,6 +2,7 @@ import os
 import threading
 import sys
 import shutil
+from urllib.parse import unquote, urlparse
 
 import tkinter as tk
 import tkinter.font as tkfont
@@ -20,6 +21,12 @@ try:
 except ImportError:
     raise SystemExit("Please install pydicom: pip install pydicom")
 
+try:
+    from tkinterdnd2 import DND_FILES, TkinterDnD
+except ImportError:
+    DND_FILES = None
+    TkinterDnD = None
+
 from .constants import APP_NAME, APP_VERSION, APP_COPYRIGHT
 from .lru_cache import LRUCache
 from .utils_dicom import (
@@ -29,11 +36,13 @@ from .utils_dicom import (
     safe_str,
 )
 
+_DICOM_VIEWER_BASE = TkinterDnD.Tk if TkinterDnD is not None else tk.Tk
+
 
 # ----------------------------
 # GUI Application
 # ----------------------------
-class DICOMViewer(tk.Tk):
+class DICOMViewer(_DICOM_VIEWER_BASE):
     """Tkinter-based DICOM viewer application.
 
     This class implements the main GUI for browsing, visualising and
@@ -94,7 +103,7 @@ class DICOMViewer(tk.Tk):
 # ----------------------------
 # GUI Application
 # ----------------------------
-class DICOMViewer(tk.Tk):
+class DICOMViewer(_DICOM_VIEWER_BASE):
     def __init__(self):
         """Initialize the DICOM viewer window and internal state.
 
@@ -392,6 +401,7 @@ class DICOMViewer(tk.Tk):
         file_tree_vsb.pack(side=tk.RIGHT, fill=tk.Y, padx=(0, 6), pady=6)
 
         self.file_tree.bind("<<TreeviewSelect>>", self._on_tree_select)
+        self._configure_file_tree_drop_target()
 
         # Right: image + header
         right_pane = ttk.Panedwindow(main_pane, orient=tk.VERTICAL)
@@ -1042,6 +1052,76 @@ class DICOMViewer(tk.Tk):
     # ----------------------------
     # Folder and file handling
     # ----------------------------
+
+    def _configure_file_tree_drop_target(self):
+        """Enable folder drop support on the file tree when TkDnD is available."""
+        if DND_FILES is None:
+            return
+
+        try:
+            self.file_tree.drop_target_register(DND_FILES)
+            self.file_tree.dnd_bind("<<Drop>>", self._on_file_tree_drop)
+        except Exception:
+            # Keep the viewer fully usable even if drag-and-drop init fails.
+            pass
+
+    def _parse_drop_paths(self, drop_data):
+        """Parse TkDnD payload text into local filesystem paths."""
+        if not drop_data:
+            return []
+
+        try:
+            items = list(self.tk.splitlist(drop_data))
+        except Exception:
+            items = []
+
+        if not items:
+            items = [
+                part for part in str(drop_data).replace("\r", "\n").split("\n") if part
+            ]
+
+        out = []
+        for item in items:
+            path = str(item).strip().strip("{}")
+            if not path:
+                continue
+
+            if path.startswith("file://"):
+                parsed = urlparse(path)
+                path = unquote(parsed.path or "")
+                if parsed.netloc and parsed.netloc != "localhost":
+                    path = f"//{parsed.netloc}{path}"
+
+            out.append(os.path.expanduser(path))
+
+        return out
+
+    def _extract_folder_from_drop_data(self, drop_data):
+        """Return a folder path from dropped items, if possible."""
+        paths = self._parse_drop_paths(drop_data)
+
+        for path in paths:
+            if os.path.isdir(path):
+                return os.path.abspath(path)
+
+        for path in paths:
+            if os.path.isfile(path):
+                return os.path.abspath(os.path.dirname(path))
+
+        return None
+
+    def _on_file_tree_drop(self, event):
+        """Load a dropped folder into the viewer from the DICOM list panel."""
+        if self.btn_open.instate(["disabled"]):
+            return "break"
+
+        folder = self._extract_folder_from_drop_data(getattr(event, "data", ""))
+        if not folder:
+            self.status_bar_label.config(text="Drop a folder (or DICOM file) to open")
+            return "break"
+
+        self.load_folder(folder)
+        return "break"
 
     def open_folder(self):
         """Show a folder selection dialog and load the chosen folder."""

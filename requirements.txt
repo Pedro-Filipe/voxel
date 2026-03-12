@@ -4,3 +4,4 @@ numpy
 pylibjpeg
 pylibjpeg-libjpeg
 pylibjpeg-openjpeg
+tkinterdnd2
