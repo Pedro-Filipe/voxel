@@ -223,11 +223,14 @@ class DICOMViewer(_DICOM_VIEWER_BASE):
         self._mouse_x_canvas = None
         self._mouse_y_canvas = None
         self.show_crosshair = tk.BooleanVar(value=True)
+        self.show_histogram = tk.BooleanVar(value=True)
 
         # Pixel readout caches
         self._frame_raw = None
         self._frame_modality = None
         self._frame_is_color = False
+        self._hist_cache_key = None
+        self._hist_cache_data = None
 
         # Filters
         self.file_filter_var = tk.StringVar()
@@ -299,6 +302,12 @@ class DICOMViewer(_DICOM_VIEWER_BASE):
             variable=self.show_crosshair,
             command=self._update_canvas_image,
         )
+        self.chk_histogram = ttk.Checkbutton(
+            toolbar,
+            text="Histogram",
+            variable=self.show_histogram,
+            command=self._update_canvas_image,
+        )
 
         # ROI controls: Button toggles ROI mode (Enter/Exit)
         self.btn_roi_toggle = ttk.Button(
@@ -317,6 +326,7 @@ class DICOMViewer(_DICOM_VIEWER_BASE):
         self.btn_prev.pack(side=tk.LEFT, padx=3)
         self.btn_next.pack(side=tk.LEFT, padx=3)
         self.chk_crosshair.pack(side=tk.LEFT, padx=(12, 6))
+        self.chk_histogram.pack(side=tk.LEFT, padx=(0, 6))
         self.btn_roi_toggle.pack(side=tk.LEFT, padx=(6, 3))
         self.btn_roi_clear.pack(side=tk.LEFT, padx=(3, 6))
 
@@ -1938,6 +1948,7 @@ class DICOMViewer(_DICOM_VIEWER_BASE):
         self.canvas.create_image(x, y, image=self.current_image_tk, anchor="center")
 
         # Draw overlays after image so they appear on top
+        self._draw_histogram_overlay()
         self._draw_overlay()  # crosshair + pixel readout
         self._redraw_roi_overlay()  # freehand ROI overlay
         self._draw_diffusion_overlay()
@@ -2657,6 +2668,185 @@ class DICOMViewer(_DICOM_VIEWER_BASE):
             self.canvas.tag_lower(rect_id, txt_id)
         except Exception:
             pass
+
+    def _get_histogram_data_for_current_frame(self, bins=48):
+        """Return histogram data for all pixels in the current frame.
+
+        Args:
+            bins (int): Number of histogram bins.
+
+        Returns:
+            dict | None: Histogram payload with counts/range, or ``None``.
+        """
+        if self.current_ds is None or self._frame_raw is None:
+            return None
+
+        cache_key = (id(self.current_ds), int(self.current_frame_index), int(bins))
+        if self._hist_cache_key == cache_key and self._hist_cache_data is not None:
+            return self._hist_cache_data
+
+        try:
+            vals = np.asarray(self._frame_raw, dtype=np.float32).ravel()
+            vals = vals[np.isfinite(vals)]
+            if vals.size == 0:
+                self._hist_cache_key = cache_key
+                self._hist_cache_data = None
+                return None
+
+            # Estimate a small dead-zone around zero and ignore it when
+            # determining histogram range (common MRI background behavior).
+            abs_vals = np.abs(vals)
+            abs_p99 = float(np.percentile(abs_vals, 99))
+            bg_eps = max(1e-6, abs_p99 * 0.10)
+            fg_vals = vals[abs_vals > bg_eps]
+            range_vals = fg_vals if fg_vals.size >= max(32, bins) else vals
+
+            vmin = float(np.min(range_vals))
+            vmax = float(np.max(range_vals))
+            if vmax <= vmin:
+                counts = np.array([float(vals.size)], dtype=np.float32)
+            else:
+                counts, _ = np.histogram(vals, bins=bins, range=(vmin, vmax))
+                counts = counts.astype(np.float32)
+
+            payload = {
+                "counts": counts,
+                "vmin": vmin,
+                "vmax": vmax,
+                "total": int(vals.size),
+            }
+            self._hist_cache_key = cache_key
+            self._hist_cache_data = payload
+            return payload
+        except Exception:
+            self._hist_cache_key = cache_key
+            self._hist_cache_data = None
+            return None
+
+    def _format_histogram_value(self, value):
+        """Format numeric histogram axis values for compact labels."""
+        try:
+            v = float(value)
+        except Exception:
+            return "n/a"
+
+        av = abs(v)
+        if av >= 1000:
+            return f"{v:.0f}"
+        if av >= 10:
+            return f"{v:.1f}"
+        return f"{v:.2f}"
+
+    def _draw_histogram_overlay(self):
+        """Draw a mini histogram for current-frame pixel values.
+
+        The histogram is rendered in the bottom-left corner of the image
+        viewer panel and includes min/max value labels.
+        """
+        self.canvas.delete("overlay_hist")
+        if not self.show_histogram.get():
+            return
+        if self.current_image_pil is None:
+            return
+
+        hist = self._get_histogram_data_for_current_frame(bins=48)
+        if hist is None:
+            return
+
+        counts = hist["counts"]
+        if counts.size == 0:
+            return
+
+        max_count = float(np.max(counts))
+        if max_count <= 0:
+            return
+
+        canvas_h = max(1, self.canvas.winfo_height())
+        panel_x0 = 10
+        panel_y1 = canvas_h - 10
+        panel_w = 220
+        panel_h = 112
+        panel_x1 = panel_x0 + panel_w
+        panel_y0 = panel_y1 - panel_h
+
+        self.canvas.create_rectangle(
+            panel_x0,
+            panel_y0,
+            panel_x1,
+            panel_y1,
+            fill="#111111",
+            outline="#444444",
+            width=1,
+            tags=("overlay_hist",),
+        )
+
+        title_y = panel_y0 + 8
+        self.canvas.create_text(
+            panel_x0 + 8,
+            title_y,
+            text="Histogram (all pixels)",
+            fill="#f0f0f0",
+            anchor="nw",
+            font=("TkDefaultFont", 8, "bold"),
+            tags=("overlay_hist",),
+        )
+
+        plot_x0 = panel_x0 + 8
+        plot_x1 = panel_x1 - 8
+        plot_y0 = panel_y0 + 24
+        plot_y1 = panel_y1 - 22
+        plot_w = max(1.0, float(plot_x1 - plot_x0))
+        plot_h = max(1.0, float(plot_y1 - plot_y0))
+        bar_w = plot_w / float(counts.size)
+
+        self.canvas.create_rectangle(
+            plot_x0,
+            plot_y0,
+            plot_x1,
+            plot_y1,
+            fill="#0a0a0a",
+            outline="#2f2f2f",
+            width=1,
+            tags=("overlay_hist",),
+        )
+
+        for idx, c in enumerate(counts):
+            if c <= 0:
+                continue
+            x0 = plot_x0 + idx * bar_w
+            x1 = x0 + bar_w
+            h = (float(c) / max_count) * plot_h
+            y0 = plot_y1 - h
+            self.canvas.create_rectangle(
+                x0,
+                y0,
+                x1,
+                plot_y1,
+                fill="#62d6ff",
+                outline="",
+                tags=("overlay_hist",),
+            )
+
+        min_txt = self._format_histogram_value(hist["vmin"])
+        max_txt = self._format_histogram_value(hist["vmax"])
+        self.canvas.create_text(
+            plot_x0,
+            panel_y1 - 8,
+            text=min_txt,
+            fill="#d0d0d0",
+            anchor="sw",
+            font=("TkDefaultFont", 7),
+            tags=("overlay_hist",),
+        )
+        self.canvas.create_text(
+            plot_x1,
+            panel_y1 - 8,
+            text=max_txt,
+            fill="#d0d0d0",
+            anchor="se",
+            font=("TkDefaultFont", 7),
+            tags=("overlay_hist",),
+        )
 
     # ----------------------------
     # Basic DICOM metadata overlay (right-aligned vertical stack)
