@@ -10,6 +10,11 @@ Voxel - A DICOM Viewer
 
 A DICOM viewer with advanced features including multi-frame navigation, window/level control, diffusion imaging overlays, freehand ROI analysis, and comprehensive header exploration that supports the modern multi-frame DICOM format.
 
+<p align="left">
+<img src="voxel/assets/gui_screenshot.png">
+</p>
+GUI screenshot.
+
 ## 🌟 Features
 
 ### Core Viewing Capabilities
