@@ -2723,6 +2723,41 @@ class DICOMViewer(_DICOM_VIEWER_BASE):
             self._hist_cache_data = None
             return None
 
+    def _get_roi_histogram_counts(self, bins, vmin, vmax):
+        """Return ROI histogram counts using the provided histogram range.
+
+        Args:
+            bins (int): Number of histogram bins.
+            vmin (float): Lower bound for histogram range.
+            vmax (float): Upper bound for histogram range.
+
+        Returns:
+            numpy.ndarray | None: ROI counts per bin, or ``None``.
+        """
+        if self.roi_mask is None or self._frame_raw is None:
+            return None
+
+        try:
+            arr = np.asarray(self._frame_raw, dtype=np.float32)
+            if arr.ndim == 2:
+                roi_vals = arr[self.roi_mask]
+            elif arr.ndim == 3 and arr.shape[:2] == self.roi_mask.shape:
+                roi_vals = arr[self.roi_mask].reshape(-1)
+            else:
+                return None
+
+            roi_vals = roi_vals[np.isfinite(roi_vals)]
+            if roi_vals.size == 0:
+                return None
+
+            if vmax <= vmin:
+                return np.array([float(roi_vals.size)], dtype=np.float32)
+
+            counts, _ = np.histogram(roi_vals, bins=bins, range=(vmin, vmax))
+            return counts.astype(np.float32)
+        except Exception:
+            return None
+
     def _format_histogram_value(self, value):
         """Format numeric histogram axis values for compact labels."""
         try:
@@ -2742,6 +2777,9 @@ class DICOMViewer(_DICOM_VIEWER_BASE):
 
         The histogram is rendered in the bottom-left corner of the image
         viewer panel and includes min/max value labels.
+
+        If an ROI mask exists, its distribution is superimposed using a
+        stippled fill to approximate transparency.
         """
         self.canvas.delete("overlay_hist")
         if not self.show_histogram.get():
@@ -2826,6 +2864,46 @@ class DICOMViewer(_DICOM_VIEWER_BASE):
                 outline="",
                 tags=("overlay_hist",),
             )
+
+        roi_counts = self._get_roi_histogram_counts(
+            bins=int(counts.size),
+            vmin=hist["vmin"],
+            vmax=hist["vmax"],
+        )
+        if roi_counts is not None and roi_counts.size == counts.size:
+            roi_max = float(np.max(roi_counts))
+            if roi_max > 0:
+                for idx, c in enumerate(roi_counts):
+                    if c <= 0:
+                        continue
+                    x0 = plot_x0 + idx * bar_w
+                    x1 = x0 + bar_w
+                    h = (float(c) / roi_max) * plot_h
+                    y0 = plot_y1 - h
+                    bar_id = self.canvas.create_rectangle(
+                        x0,
+                        y0,
+                        x1,
+                        plot_y1,
+                        fill="#ff9b54",
+                        outline="",
+                        tags=("overlay_hist",),
+                    )
+                    # Tk canvas has no alpha; stipple gives a transparent effect.
+                    try:
+                        self.canvas.itemconfigure(bar_id, stipple="gray50")
+                    except Exception:
+                        pass
+
+                self.canvas.create_text(
+                    panel_x1 - 8,
+                    title_y,
+                    text="ROI",
+                    fill="#ffb273",
+                    anchor="ne",
+                    font=("TkDefaultFont", 8, "bold"),
+                    tags=("overlay_hist",),
+                )
 
         min_txt = self._format_histogram_value(hist["vmin"])
         max_txt = self._format_histogram_value(hist["vmax"])
@@ -3233,6 +3311,7 @@ class DICOMViewer(_DICOM_VIEWER_BASE):
         self.roi_mask = None
         self.roi_stats = None
         self._redraw_roi_overlay()
+        self._draw_histogram_overlay()
         self._update_roi_label()
 
     def _on_roi_start(self, event):
@@ -3246,6 +3325,7 @@ class DICOMViewer(_DICOM_VIEWER_BASE):
         self.roi_mask = None
         self.roi_stats = None
         self._redraw_roi_overlay()
+        self._draw_histogram_overlay()
 
     def _on_roi_draw(self, event):
         if not self._roi_drawing or self.current_image_pil is None:
@@ -3294,6 +3374,7 @@ class DICOMViewer(_DICOM_VIEWER_BASE):
 
         self.roi_stats = self._compute_roi_stats()
         self._redraw_roi_overlay()
+        self._draw_histogram_overlay()
         self._update_roi_label()
 
     def _get_scalar_frame_for_stats(self):
