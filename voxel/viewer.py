@@ -38,6 +38,9 @@ from .utils_dicom import (
 
 _DICOM_VIEWER_BASE = TkinterDnD.Tk if TkinterDnD is not None else tk.Tk
 
+# How often the UI thread refreshes the folder-loading progress display.
+_LOAD_PROGRESS_POLL_MS = 50
+
 
 # ----------------------------
 # GUI Application
@@ -1165,54 +1168,62 @@ class DICOMViewer(_DICOM_VIEWER_BASE):
         # Disable Open button while working
         self.btn_open.config(state="disabled")
 
+        # Shared between the worker and the UI thread. The worker only writes
+        # plain values here; a Tk call per file from the worker would block it
+        # on a round trip to the UI thread and dominate the load time.
+        state = {"total": None, "done": 0, "error": None, "result": None}
+
         def worker():
-            # This runs in a background thread - NO direct Tk calls here!
+            # This runs in a background thread - NO Tk calls here!
             try:
                 files = self._scan_dicom_files(folder)
-                total = len(files)
+                state["total"] = len(files)
 
-                # Switch to determinate progress now that we know total
-                def _start_determinate(total=total):
-                    self.status_bar_progress.stop()
-                    self.status_bar_progress.config(
-                        mode="determinate", maximum=max(total, 1), value=0
-                    )
-                    self.status_bar_label.config(
-                        text=f"Loading DICOM metadata: 0 / {total}"
-                    )
-
-                self.after(0, _start_determinate)
-
-                def progress_cb(i, total=total):
-                    self.after(
-                        0,
-                        lambda i=i: (
-                            self.status_bar_progress.config(value=i),
-                            self.status_bar_label.config(
-                                text=f"Loading DICOM metadata: {i} / {total}"
-                            ),
-                        ),
-                    )
+                def progress_cb(i):
+                    state["done"] = i
 
                 series_hierarchy, metadata_cache = self._build_series_hierarchy_thread(
                     files, progress_cb
                 )
             except Exception as exc:
-                # Report error on main thread
-                self.after(0, lambda exc=exc: messagebox.showerror("Error", str(exc)))
+                state["error"] = exc
                 files = []
                 series_hierarchy = {}
                 metadata_cache = {}
 
-            # Hand results back to main thread
-            self.after(
-                0,
-                lambda: self._finish_load_folder(
-                    folder, files, series_hierarchy, metadata_cache
-                ),
-            )
+            state["result"] = (files, series_hierarchy, metadata_cache)
+
+        determinate = False
+
+        def poll():
+            # Runs on the main thread: mirror worker progress into the UI.
+            nonlocal determinate
+
+            if state["result"] is not None:
+                if state["error"] is not None:
+                    messagebox.showerror("Error", str(state["error"]))
+                self._finish_load_folder(folder, *state["result"])
+                return
+
+            total = state["total"]
+            if total is not None:
+                if not determinate:
+                    # Switch to determinate progress now that we know total
+                    determinate = True
+                    self.status_bar_progress.stop()
+                    self.status_bar_progress.config(
+                        mode="determinate", maximum=max(total, 1)
+                    )
+                done = state["done"]
+                self.status_bar_progress.config(value=done)
+                self.status_bar_label.config(
+                    text=f"Loading DICOM metadata: {done} / {total}"
+                )
+
+            self.after(_LOAD_PROGRESS_POLL_MS, poll)
 
         threading.Thread(target=worker, daemon=True).start()
+        self.after(_LOAD_PROGRESS_POLL_MS, poll)
 
     def _scan_dicom_files(self, folder):
         """Recursively scan a folder and collect DICOM files.
@@ -1266,8 +1277,8 @@ class DICOMViewer(_DICOM_VIEWER_BASE):
             progress_cb (callable | None): Optional callback
                 ``progress_cb(i)`` called after each file is processed,
                 where ``i`` is the 1-based count of files processed so
-                far. Called from the background thread via
-                ``self.after``.
+                far. Called directly on the background thread, so it
+                must not touch Tk.
 
         Returns:
             tuple[dict, dict]: A tuple ``(series_hierarchy, metadata_cache)``,
